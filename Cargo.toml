@@ -4,7 +4,7 @@ members = ["protocol", "cli", "bindings/python"]
 default-members = ["protocol"] # Build only protocol by default
 
 [workspace.package]
-version = "0.1.0-beta.0"
+version = "0.1.0-beta.1"
 edition = "2024"
 authors = [
     "Khoa Nguyen <khoa@openmined.org>",
@@ -27,7 +27,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [workspace.dependencies]
-syftbox-crypto-protocol = { path = "protocol", version = "0.1.0-beta.0" }
+syftbox-crypto-protocol = { path = "protocol", version = "0.1.0-beta.1" }
 # Core cryptographic dependencies
 ed25519-dalek = { version = "2", features = ["std", "zeroize"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
