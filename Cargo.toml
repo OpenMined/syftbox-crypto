@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"                 # so that dev-dependency features don't leak into products
+members = ["protocol", "cli", "bindings/python"]
+default-members = ["protocol"] # Build only protocol by default
+
+[workspace.package]
+version = "0.1.0-beta.0"
+edition = "2024"
+authors = [
+    "Khoa Nguyen <khoa@openmined.org>",
+    "Madhava Jay <madhava@openmined.org>",
+]
+license = "Apache-2.0"
+repository = "https://github.com/OpenMined/syftbox-crypto"
+keywords = ["encryption", "e2e", "x3dh", "privacy", "cryptography"]
+categories = ["cryptography"]
+rust-version = "1.90.0"
+
+[workspace.lints.clippy]
+# Prefer TryFrom between integers unless truncation is desired
+cast_possible_truncation = "warn"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(fuzzing)',
+    'cfg(tokio_unstable)',
+] }
+
+[workspace.dependencies]
+syftbox-crypto-protocol = { path = "protocol", version = "0.1.0-beta.0" }
+# Core cryptographic dependencies
+ed25519-dalek = { version = "2", features = ["std", "zeroize"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+rand = "0.9"
+rand_chacha = "0.9"
+rand_core = "0.6"
+hex = "0.4"
+hkdf = "0.12"
+sha2 = "0.10"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization and utilities
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+urlencoding = "2.1"
+zeroize = { version = "1.8.2", features = ["derive"] }
+thiserror = "2.0.17"
+bip39 = "2.1"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+subtle = "2.6"
+
+# CLI dependencies
+clap = { version = "4", features = ["derive"] }
+
+# Testing dependencies
+tempfile = "3"

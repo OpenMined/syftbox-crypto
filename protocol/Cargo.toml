@@ -1,0 +1,47 @@
+[package]
+name = "syftbox-crypto-protocol"
+description = "Cryptographic protocol implementation for SyftBox using X3DH key agreement"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+hex.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+urlencoding.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+bip39.workspace = true
+subtle.workspace = true
+chacha20poly1305.workspace = true
+serde_jcs = "0.1"
+anyhow = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-acl = "0.3"
+winapi = { version = "0.3", features = ["winnt"] }
+
+[dev-dependencies]
+rand_chacha.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+flate2 = "1.0"
+tar = "0.4"
+
+[lib]
+name = "syftbox_crypto_protocol"
+path = "src/lib.rs"
