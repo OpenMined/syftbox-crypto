@@ -1,0 +1,395 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        required: false
+        type: choice
+        default: 'none'
+        options:
+          - none
+          - patch
+          - minor
+          - major
+      force_version:
+        description: 'Force a specific version (e.g., 0.1.1)'
+        required: false
+        type: string
+      skip_tests:
+        description: 'Skip tests (use with caution)'
+        required: false
+        type: boolean
+        default: false
+      bump_only:
+        description: 'Only bump the version and skip build/release steps'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Run tests
+    if: ${{ !inputs.skip_tests && !inputs.bump_only }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run workspace tests (protocol + CLI)
+        run: cargo test --workspace --all-features
+
+  check-version:
+    name: Check if version needs bump
+    needs: [test]
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    outputs:
+      needs_bump: ${{ steps.check.outputs.needs_bump }}
+      current_version: ${{ steps.check.outputs.current_version }}
+      new_version: ${{ steps.check.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Check version
+        id: check
+        shell: bash
+        run: |
+          CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          FORCE_VERSION="${{ github.event.inputs.force_version }}"
+          BUMP_TYPE_INPUT="${{ github.event.inputs.bump_type }}"
+
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+
+          NEEDS_BUMP=false
+          NEW_VERSION="$CURRENT_VERSION"
+          BUMP_KIND="patch"
+
+          if [[ -n "$FORCE_VERSION" ]]; then
+            NEW_VERSION="$FORCE_VERSION"
+            if [[ "$CURRENT_VERSION" != "$FORCE_VERSION" ]]; then
+              NEEDS_BUMP=true
+            fi
+          elif [[ -n "$BUMP_TYPE_INPUT" && "$BUMP_TYPE_INPUT" != "none" ]]; then
+            NEEDS_BUMP=true
+            BUMP_KIND="$BUMP_TYPE_INPUT"
+          elif git tag | grep -q "v$CURRENT_VERSION"; then
+            NEEDS_BUMP=true
+            BUMP_KIND="patch"
+            echo "Detected existing tag v$CURRENT_VERSION, bumping patch/pre-release component" >&2
+          fi
+
+          if [[ "$NEEDS_BUMP" == true ]]; then
+            NEW_VERSION=$(python3 scripts/version_tools.py bump --current "$CURRENT_VERSION" --kind "$BUMP_KIND")
+          fi
+
+          echo "needs_bump=$NEEDS_BUMP" >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+  bump-version:
+    name: Bump version if needed
+    runs-on: ubuntu-latest
+    needs: check-version
+    if: needs.check-version.outputs.needs_bump == 'true'
+    outputs:
+      version: ${{ needs.check-version.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Update version in workspace Cargo.toml
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-version.outputs.new_version }}"
+
+          # Update all version files using version_tools.py
+          python3 scripts/version_tools.py update --version "$VERSION"
+
+          # Update Cargo.lock
+          cargo update --workspace
+
+      - name: Commit version bump
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to ${{ needs.check-version.outputs.new_version }} [skip ci]"
+          git push
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: [check-version, bump-version]
+    if: |
+      always() &&
+      !inputs.bump_only &&
+      needs.check-version.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: sbc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: sbc
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary: sbc
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            binary: sbc
+
+          # macOS
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: sbc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: sbc
+
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: sbc.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary: sbc.exe
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Ensure target installed
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+
+      - name: Configure cargo target linker
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          mkdir -p ~/.cargo
+          cfg=~/.cargo/config.toml
+          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+            printf '[target.x86_64-unknown-linux-musl]\nlinker = "musl-gcc"\n' >> "$cfg"
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> "$cfg"
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            printf '[target.aarch64-unknown-linux-musl]\nlinker = "aarch64-linux-gnu-gcc"\n' >> "$cfg"
+          fi
+
+      - name: Build
+        shell: bash
+        run: |
+          cd cli
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a ../../../sbc-${{ matrix.target }}.zip ${{ matrix.binary }}
+          else
+            tar czf ../../../sbc-${{ matrix.target }}.tar.gz ${{ matrix.binary }}
+          fi
+          cd -
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbc-${{ matrix.target }}
+          path: sbc-${{ matrix.target }}.*
+
+  publish-protocol:
+    name: Publish protocol to crates.io
+    runs-on: ubuntu-latest
+    needs: [build, check-version, bump-version]
+    if: |
+      always() &&
+      !inputs.bump_only &&
+      needs.build.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish protocol to crates.io
+        run: cd protocol && cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+  publish-cli:
+    name: Publish CLI to crates.io
+    runs-on: ubuntu-latest
+    needs: [publish-protocol, check-version, bump-version]
+    if: |
+      always() &&
+      !inputs.bump_only &&
+      needs.publish-protocol.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Wait a bit for the protocol crate to be available on crates.io
+      - name: Wait for protocol crate availability
+        run: sleep 30
+
+      - name: Publish CLI to crates.io
+        run: cd cli && cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, check-version, bump-version, publish-protocol, publish-cli]
+    if: |
+      always() &&
+      !inputs.bump_only &&
+      needs.build.result == 'success' &&
+      (needs.bump-version.result == 'success' || needs.bump-version.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Get final version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES_FILE=$(mktemp)
+          cat > "$NOTES_FILE" <<EOF
+          # SyftBox Crypto v${{ steps.version.outputs.version }}
+
+          Cryptographic protocol implementation for SyftBox using X3DH key agreement.
+
+          ## Crates Published
+
+          - \`syftbox-crypto-protocol\` - Protocol library
+          - \`syftbox-crypto-cli\` - Command-line interface (sbc)
+
+          ## Installation
+
+          ### Using Cargo
+          \`\`\`bash
+          # Install the CLI tool
+          cargo install syftbox-crypto-cli
+
+          # Or add the protocol library to your project
+          cargo add syftbox-crypto-protocol
+          \`\`\`
+
+          ### From Binary
+          Download the appropriate binary for your platform from the assets below.
+          EOF
+
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "Release v${{ steps.version.outputs.version }}" \
+            --notes-file "$NOTES_FILE" \
+            --repo "${{ github.repository }}" \
+            --latest
+
+      - name: Upload Release Assets
+        run: |
+          for file in artifacts/*/*.{tar.gz,zip}; do
+            if [ -f "$file" ]; then
+              asset_name=$(basename "$file")
+              echo "Uploading $asset_name"
+              gh release upload v${{ steps.version.outputs.version }} "$file" \
+                --repo ${{ github.repository }}
+            fi
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

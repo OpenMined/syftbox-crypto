@@ -1,0 +1,214 @@
+name: Python Release (PyPI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - custom
+        default: 'patch'
+      custom_version:
+        description: 'Custom version (only if bump=custom, e.g., 0.2.0)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.new.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Get current version
+        id: current
+        run: |
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=${CURRENT}" >> $GITHUB_OUTPUT
+          echo "Current version: ${CURRENT}"
+
+      - name: Calculate new version
+        id: new
+        run: |
+          bump="${{ inputs.bump }}"
+          custom="${{ inputs.custom_version }}"
+          CURRENT="${{ steps.current.outputs.version }}"
+
+          if [[ "$bump" == "custom" ]]; then
+            if [[ -z "$custom" ]]; then
+              echo "custom_version is required when bump=custom" >&2
+              exit 1
+            fi
+            NEW_VERSION="$custom"
+          else
+            NEW_VERSION=$(python3 scripts/version_tools.py bump --current "$CURRENT" --kind "$bump")
+          fi
+
+          if [[ -z "$NEW_VERSION" ]]; then
+            echo "Failed to calculate new version" >&2
+            exit 1
+          fi
+
+          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "New version: ${NEW_VERSION}"
+
+      - name: Bump version files
+        run: |
+          VERSION="${{ steps.new.outputs.version }}"
+
+          # Update all version files using version_tools.py
+          python3 scripts/version_tools.py update --version "$VERSION"
+
+      - name: Refresh Cargo.lock
+        run: cargo update --workspace
+
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock bindings/python/Cargo.toml bindings/python/pyproject.toml
+          git commit -m "Bump python package version to ${{ steps.new.outputs.version }}"
+          git tag "v${{ steps.new.outputs.version }}-py"
+          git push origin HEAD:main --tags
+
+  build-wheels:
+    needs: version-bump
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            manylinux: off
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            manylinux: off
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: off
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: "true"
+          manylinux: ${{ matrix.manylinux }}
+          before-script-linux: |
+            # Install newer protoc in manylinux container
+            PROTOC_VERSION="28.3"
+            ARCH="$(uname -m)"
+            # Map to protoc release naming (aarch64 -> aarch_64)
+            if [ "$ARCH" = "aarch64" ]; then
+              PROTOC_ARCH="aarch_64"
+            else
+              PROTOC_ARCH="$ARCH"
+            fi
+            curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+            unzip -q protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip -d /usr/local
+            rm protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip
+            protoc --version
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: bindings/python/dist/*.whl
+
+  build-sdist:
+    needs: version-bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: bindings/python
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: bindings/python/dist/*.tar.gz
+
+  publish:
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          name: sdist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          password: ${{ secrets.PYPI_API_TOKEN }}
